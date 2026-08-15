@@ -1,8 +1,13 @@
+import dotenv from 'dotenv';
+// Load environment variables
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import Parser from 'rss-parser';
+import mongoose from 'mongoose';
 import { SOURCES } from './sources.js';
 import {
   addArticles,
@@ -17,6 +22,12 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+  console.error('CRITICAL: MONGODB_URI environment variable is missing!');
+  process.exit(1);
+}
 
 app.use(cors());
 app.use(express.json());
@@ -32,7 +43,7 @@ const parser = new Parser({
 let isSyncing = false;
 
 /**
- * Scrapes all configured feeds, parses them, and stores the news
+ * Scrapes all configured feeds, parses them, and stores the news in MongoDB
  */
 async function syncFeeds() {
   if (isSyncing) {
@@ -42,13 +53,12 @@ async function syncFeeds() {
 
   isSyncing = true;
   console.log(`[${new Date().toISOString()}] Starting news synchronization...`);
-  updateSyncStatus({ status: 'syncing' });
+  await updateSyncStatus({ status: 'syncing' });
 
   let totalAdded = 0;
   const errors = [];
 
-  // Scrape feeds in parallel batches or sequential to avoid hogging bandwidth.
-  // Sequential or chunked promises is safer on network. Let's run chunks of 5 at a time.
+  // Scrape feeds in batches of 5 to manage network performance
   const chunkSize = 5;
   for (let i = 0; i < SOURCES.length; i += chunkSize) {
     const chunk = SOURCES.slice(i, i + chunkSize);
@@ -57,7 +67,7 @@ async function syncFeeds() {
         console.log(`Fetching feed: ${source.name} (${source.category} - ${source.region}) - ${source.url}`);
         const feed = await parser.parseURL(source.url);
         if (feed && feed.items) {
-          const added = addArticles(feed.items, source);
+          const added = await addArticles(feed.items, source);
           totalAdded += added;
           console.log(`Finished ${source.name}: Added ${added} new articles.`);
         }
@@ -70,7 +80,7 @@ async function syncFeeds() {
     await Promise.all(promises);
   }
 
-  const statusResult = updateSyncStatus({
+  const statusResult = await updateSyncStatus({
     status: 'success',
     addedCount: totalAdded,
     error: errors.length > 0 ? `${errors.length} feeds failed to sync` : null
@@ -90,12 +100,12 @@ setInterval(() => {
 
 // === API ROUTES ===
 
-// Get news articles
-app.get('/api/news', (req, res) => {
+// Get news articles from MongoDB
+app.get('/api/news', async (req, res) => {
   const { category, region, source, search, page, limit, importantOnly } = req.query;
 
   try {
-    const data = getArticles({
+    const data = await getArticles({
       category: category || 'all',
       region: region || 'all',
       source: source || 'all',
@@ -111,9 +121,9 @@ app.get('/api/news', (req, res) => {
 });
 
 // Get configured/known news sources
-app.get('/api/sources', (req, res) => {
+app.get('/api/sources', async (req, res) => {
   try {
-    const sources = getSources();
+    const sources = await getSources();
     res.json(sources);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -121,11 +131,12 @@ app.get('/api/sources', (req, res) => {
 });
 
 // Get current scraper sync status
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
   try {
-    const status = getSyncStatus();
+    const status = await getSyncStatus();
+    const statusObj = status.toObject ? status.toObject() : status;
     res.json({
-      ...status,
+      ...statusObj,
       isSyncing
     });
   } catch (err) {
@@ -159,11 +170,20 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(frontendDistPath, 'index.html'));
 });
 
-// Start Express Server
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-  
-  // Proactively run the first synchronization on start
-  console.log('Performing initial sync...');
-  syncFeeds();
-});
+// Connect to MongoDB Atlas first, then start Express Server
+console.log('Connecting to MongoDB Atlas...');
+mongoose.connect(MONGODB_URI)
+  .then(() => {
+    console.log('Successfully connected to MongoDB Atlas');
+    app.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+      
+      // Proactively run the first synchronization on start
+      console.log('Performing initial sync...');
+      syncFeeds();
+    });
+  })
+  .catch(err => {
+    console.error('CRITICAL: Database connection failed. Server shutting down...', err.message);
+    process.exit(1);
+  });

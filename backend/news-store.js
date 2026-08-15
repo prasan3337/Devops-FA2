@@ -1,56 +1,32 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import mongoose from 'mongoose';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'news.json');
+// Define Article Schema
+const articleSchema = new mongoose.Schema({
+  guid: { type: String, required: true, unique: true, index: true },
+  title: { type: String, required: true },
+  link: { type: String, required: true, index: true },
+  description: { type: String },
+  pubDate: { type: Date, required: true, index: true },
+  sourceId: { type: String, required: true },
+  source: { type: String, required: true },
+  category: { type: String, required: true, index: true },
+  region: { type: String, required: true, index: true },
+  isTopStorySource: { type: Boolean, default: false },
+  image: { type: String }
+});
 
-// Ensure database directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+const Article = mongoose.model('Article', articleSchema);
 
-// Initial DB structure
-const initialDb = {
-  articles: [], // Array of news articles
-  status: {
-    lastSync: null,
-    nextSync: null,
-    status: 'idle',
-    error: null,
-    syncCount: 0
-  }
-};
+// Define Sync Status Schema
+const syncStatusSchema = new mongoose.Schema({
+  lastSync: { type: Date },
+  nextSync: { type: Date },
+  status: { type: String, default: 'idle' },
+  error: { type: String },
+  syncCount: { type: Number, default: 0 }
+});
 
-/**
- * Reads the database file
- */
-export function readDb() {
-  try {
-    if (!fs.existsSync(DB_FILE)) {
-      writeDb(initialDb);
-      return initialDb;
-    }
-    const data = fs.readFileSync(DB_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (err) {
-    console.error('Error reading database file:', err);
-    return initialDb;
-  }
-}
-
-/**
- * Writes the database file
- */
-export function writeDb(data) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Error writing database file:', err);
-  }
-}
+const SyncStatus = mongoose.model('SyncStatus', syncStatusSchema);
 
 /**
  * Extracts a high-quality image URL from an RSS item
@@ -61,7 +37,7 @@ function extractImage(item) {
     return item.enclosure.url;
   }
 
-  // 2. Check media:content (commonly parsed by rss-parser under various keys)
+  // 2. Check media:content
   const mediaContent = item['media:content'] || item['media:thumbnail'] || item['media:group'] || item['content:media'];
   if (mediaContent) {
     if (Array.isArray(mediaContent) && mediaContent.length > 0) {
@@ -78,14 +54,12 @@ function extractImage(item) {
   const imgRegex = /<img[^>]+src=["']([^"']+)["']/i;
   const match = description.match(imgRegex);
   if (match && match[1]) {
-    // Avoid small tracker pixels or emojis
     const src = match[1];
     if (!src.includes('feedburner') && !src.includes('pixel') && !src.includes('spinner')) {
       return src;
     }
   }
 
-  // No image found
   return null;
 }
 
@@ -107,13 +81,9 @@ function stripHtml(html) {
 }
 
 /**
- * Adds a batch of parsed articles to the store, performing deduplication and capping counts
- */
-/**
  * Auto-categorizes an article based on its URL path structure if it was fetched from a general feed
  */
 function detectCategory(link, feedCategory) {
-  // If the feed is specifically designated for a topic, respect that
   if (feedCategory && feedCategory !== 'top-stories') {
     return feedCategory;
   }
@@ -141,12 +111,10 @@ function detectCategory(link, feedCategory) {
 /**
  * Adds a batch of parsed articles to the store, performing deduplication and capping counts
  */
-export function addArticles(rawArticles, feedConfig) {
-  const db = readDb();
+export async function addArticles(rawArticles, feedConfig) {
   let addedCount = 0;
 
   for (const item of rawArticles) {
-    // Unique identifier is GUID or Link
     const guid = item.guid || item.id || item.link;
     const link = item.link || '';
     
@@ -155,32 +123,40 @@ export function addArticles(rawArticles, feedConfig) {
     const title = stripHtml(item.title || 'Untitled Article');
     const description = stripHtml(item.contentSnippet || item.summary || item.description || '');
     const image = extractImage(item);
-    
-    // Auto-categorize based on URL matching
     const category = detectCategory(link, feedConfig.category);
 
-    // Check if article already exists
-    const existingIndex = db.articles.findIndex(
-      a => a.guid === guid || a.link === link || (a.title === title && a.source === feedConfig.name)
-    );
+    // Check if article already exists (by guid, link, or same title+source)
+    const article = await Article.findOne({
+      $or: [
+        { guid },
+        { link },
+        { title, source: feedConfig.name }
+      ]
+    });
 
-    if (existingIndex !== -1) {
-      const existingArticle = db.articles[existingIndex];
+    if (article) {
+      let modified = false;
       
-      // Upgrade existing top-stories article category to specific category if discovered in specific feed
-      if (existingArticle.category === 'top-stories' && category !== 'top-stories') {
-        existingArticle.category = category;
-        console.log(`[Category Upgrade] "${title}" updated to "${category}"`);
+      // Upgrade category if it was classified as top-stories but is now specific
+      if (article.category === 'top-stories' && category !== 'top-stories') {
+        article.category = category;
+        modified = true;
       }
       
-      // Update image if we found a new one
-      if (!existingArticle.image && image) {
-        existingArticle.image = image;
+      // Update image if none existed
+      if (!article.image && image) {
+        article.image = image;
+        modified = true;
       }
 
-      // Preserve isTopStorySource flags
-      if (feedConfig.isTopStorySource) {
-        existingArticle.isTopStorySource = true;
+      // Preserve top story flag
+      if (feedConfig.isTopStorySource && !article.isTopStorySource) {
+        article.isTopStorySource = true;
+        modified = true;
+      }
+
+      if (modified) {
+        await article.save();
       }
       continue;
     }
@@ -194,109 +170,103 @@ export function addArticles(rawArticles, feedConfig) {
       }
     }
 
-    // Exclude articles older than 3 days (3 * 24 * 60 * 60 * 1000 = 259,200,000 ms)
+    // Exclude articles older than 3 days
     const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
     if (Date.now() - pubDate.getTime() > THREE_DAYS_MS) {
       continue;
     }
 
-    const newArticle = {
+    const newArticle = new Article({
       guid,
       title,
       link,
       description: description.substring(0, 300) + (description.length > 300 ? '...' : ''),
-      pubDate: pubDate.toISOString(),
+      pubDate,
       sourceId: feedConfig.id,
       source: feedConfig.name,
       category,
       region: feedConfig.region,
-      isTopStorySource: feedConfig.isTopStorySource,
+      isTopStorySource: !!feedConfig.isTopStorySource,
       image
-    };
+    });
 
-    db.articles.push(newArticle);
+    await newArticle.save();
     addedCount++;
   }
 
-  // Sort articles by publication date descending
-  db.articles.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
-
-  // Cap articles per category-region combination to keep storage small and query fast
-  // (We'll keep a maximum of 150 articles per category, and remove items older than 3 days)
-  const categoryLimits = {};
-  const cappedArticles = [];
+  // Prune articles older than 3 days to keep storage clean
   const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
-  for (const article of db.articles) {
-    const ageMs = Date.now() - new Date(article.pubDate).getTime();
-    if (ageMs > THREE_DAYS_MS) {
-      continue;
-    }
-    const key = `${article.category}_${article.region}`;
-    categoryLimits[key] = (categoryLimits[key] || 0) + 1;
-    if (categoryLimits[key] <= 150) {
-      cappedArticles.push(article);
-    }
-  }
-
-  db.articles = cappedArticles;
-  writeDb(db);
+  const cutoffDate = new Date(Date.now() - THREE_DAYS_MS);
+  await Article.deleteMany({ pubDate: { $lt: cutoffDate } });
 
   return addedCount;
 }
 
 /**
- * Fetches queryable list of articles
+ * Fetches queryable list of articles from MongoDB
  */
-export function getArticles({ category, region, source, search, page = 1, limit = 20, importantOnly = false }) {
-  const db = readDb();
-  let filtered = [...db.articles];
+export async function getArticles({ category, region, source, search, page = 1, limit = 20, importantOnly = false }) {
+  const query = {};
 
   // 1. Filter by category
-  // In 'top-stories', if a source is selected, display all articles from that source.
-  // Otherwise, filter for top stories.
   if (category && category !== 'all' && category !== 'top-stories') {
-    filtered = filtered.filter(a => a.category === category);
+    query.category = category;
   } else if (category === 'top-stories') {
     if (source && source !== 'all') {
-      // Show all articles from this source in the Top News feed
+      // If a source is specified in top-stories, show all from that source
     } else {
-      filtered = filtered.filter(a => a.isTopStorySource || a.category === 'top-stories');
+      query.$or = [
+        { isTopStorySource: true },
+        { category: 'top-stories' }
+      ];
     }
   }
 
   // 2. Filter by region
   if (region && region !== 'all') {
-    filtered = filtered.filter(a => a.region.toLowerCase() === region.toLowerCase());
+    query.region = new RegExp(`^${region}$`, 'i');
   }
 
-  // 3. Filter by source (using clean newspaper name)
+  // 3. Filter by source
   if (source && source !== 'all') {
-    filtered = filtered.filter(a => a.source === source);
+    query.source = source;
   }
 
   // 4. Filter by important flag
   if (importantOnly) {
-    filtered = filtered.filter(a => a.isTopStorySource || a.category === 'top-stories');
+    if (query.$or) {
+      // already setup above
+    } else {
+      query.$or = [
+        { isTopStorySource: true },
+        { category: 'top-stories' }
+      ];
+    }
   }
 
-  // 5. Search text filter
+  // 5. Search text filter (fuzzy match)
   if (search) {
-    const query = search.toLowerCase();
-    filtered = filtered.filter(
-      a => a.title.toLowerCase().includes(query) || a.description.toLowerCase().includes(query)
-    );
+    const searchRegex = new RegExp(search, 'i');
+    if (!query.$and) query.$and = [];
+    query.$and.push({
+      $or: [
+        { title: searchRegex },
+        { description: searchRegex }
+      ]
+    });
   }
 
-  // Calculate pagination metadata
-  let total = filtered.length;
-
+  const total = await Article.countDocuments(query);
   const totalPages = Math.ceil(total / limit);
   const startIndex = (page - 1) * limit;
-  const paginatedArticles = filtered.slice(startIndex, startIndex + limit);
+
+  const articles = await Article.find(query)
+    .sort({ pubDate: -1 })
+    .skip(startIndex)
+    .limit(limit);
 
   return {
-    articles: paginatedArticles,
+    articles,
     pagination: {
       total,
       page,
@@ -307,48 +277,82 @@ export function getArticles({ category, region, source, search, page = 1, limit 
 }
 
 /**
- * Returns list of unique sources currently in the database
+ * Returns list of unique sources currently in the database using aggregation
  */
-export function getSources() {
-  const db = readDb();
-  const sourcesMap = {};
-  
-  db.articles.forEach(a => {
-    // Group by source name (newspaper brand) to ensure single entry per newspaper
-    if (!sourcesMap[a.source]) {
-      sourcesMap[a.source] = {
-        id: a.source, // Use source name as ID for frontend filtering
-        name: a.source,
-        region: a.region
-      };
-    }
-  });
-
-  return Object.values(sourcesMap);
+export async function getSources() {
+  try {
+    const results = await Article.aggregate([
+      {
+        $group: {
+          _id: '$source',
+          name: { $first: '$source' },
+          region: { $first: '$region' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          id: '$name',
+          name: 1,
+          region: 1
+        }
+      },
+      {
+        $sort: { name: 1 }
+      }
+    ]);
+    return results;
+  } catch (err) {
+    console.error('Error fetching distinct sources from aggregation:', err);
+    return [];
+  }
 }
 
 /**
- * Updates status of background syncer
+ * Updates status of background syncer in MongoDB
  */
-export function updateSyncStatus({ status, error = null, addedCount = 0 }) {
-  const db = readDb();
-  
-  db.status = {
-    lastSync: status === 'success' ? new Date().toISOString() : db.status.lastSync,
-    nextSync: status === 'success' ? new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString() : db.status.nextSync,
-    status,
-    error,
-    syncCount: db.status.syncCount + (status === 'success' ? 1 : 0)
-  };
+export async function updateSyncStatus({ status, error = null, addedCount = 0 }) {
+  try {
+    let doc = await SyncStatus.findOne();
+    if (!doc) {
+      doc = new SyncStatus();
+    }
 
-  writeDb(db);
-  return db.status;
+    if (status === 'success') {
+      doc.lastSync = new Date();
+      doc.nextSync = new Date(Date.now() + 3 * 60 * 60 * 1000);
+      doc.syncCount += 1;
+    }
+    doc.status = status;
+    doc.error = error;
+
+    await doc.save();
+    return doc;
+  } catch (err) {
+    console.error('Error updating sync status:', err);
+    return { status, error, syncCount: 0 };
+  }
 }
 
 /**
  * Returns current sync status
  */
-export function getSyncStatus() {
-  const db = readDb();
-  return db.status;
+export async function getSyncStatus() {
+  try {
+    let doc = await SyncStatus.findOne();
+    if (!doc) {
+      doc = new SyncStatus();
+      await doc.save();
+    }
+    return doc;
+  } catch (err) {
+    console.error('Error fetching sync status:', err);
+    return {
+      lastSync: null,
+      nextSync: null,
+      status: 'idle',
+      error: err.message,
+      syncCount: 0
+    };
+  }
 }
