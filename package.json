@@ -1,5 +1,5 @@
 {
-  "name": "apex-news-aggregator",
+  "name": "todays-news-aggregator",
   "version": "1.0.0",
   "description": "Premium 3-hour scheduled news aggregator app with global and India feeds",
   "main": "backend/server.js",

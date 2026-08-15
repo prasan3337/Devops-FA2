@@ -1,4 +1,4 @@
-# Apex News Aggregator 
+# Todays News Aggregator 📰
 
 A premium, lightweight, self-updating news aggregator application featuring global and Indian feeds. Built with a React + Vite frontend and an Express backend, the app scrapes RSS news feeds on a rolling 3-hour schedule, automatically categorizes stories, prunes old data, and serves articles through a modern, responsive UI.
 
@@ -19,7 +19,7 @@ A premium, lightweight, self-updating news aggregator application featuring glob
 The project is structured as a monorepo, cleanly dividing backend API logic and scraper capabilities from the frontend single-page application:
 
 ```text
-apex-news-aggregator/
+todays-news-aggregator/
 ├── backend/
 │   ├── data/                 # JSON file database storage
 │   │   └── news.json         # Persisted articles and scraper status

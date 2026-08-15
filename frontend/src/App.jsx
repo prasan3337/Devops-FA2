@@ -271,7 +271,7 @@ function App() {
         <div className="header-brand">
           <span className="logo-icon">📰</span>
           <div className="logo-text">
-            <h1>ApexNews</h1>
+            <h1>Todays News</h1>
             <span className="logo-subtext">Real-time Smart Aggregator</span>
           </div>
         </div>
@@ -512,7 +512,7 @@ function App() {
 
       {/* Footer */}
       <footer className="app-footer">
-        <p>© 2026 ApexNews. All rights reserved. Automatically updates every 3 hours.</p>
+        <p>© 2026 Todays News. All rights reserved. Automatically updates every 3 hours.</p>
         <div className="footer-links">
           <span>Sources parsed: 30+ Reliable Feeds</span>
           <span className="divider">|</span>
