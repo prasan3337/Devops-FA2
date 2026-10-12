@@ -17643,10 +17643,10 @@
     }
   ],
   "status": {
-    "lastSync": "2026-08-15T18:11:26.780Z",
-    "nextSync": "2026-08-15T21:11:26.780Z",
+    "lastSync": "2026-08-16T02:36:24.507Z",
+    "nextSync": "2026-08-16T05:36:24.507Z",
     "status": "success",
-    "error": "1 feeds failed to sync",
-    "syncCount": 7
+    "error": "33 feeds failed to sync",
+    "syncCount": 9
   }
 }
